@@ -9,7 +9,7 @@
 **核心流程：**
 
 ```
-原始文档 → Step 0 (段落切分) → Step 1 (语义分析) → Step 2 (对象抽取) → 结构化输出
+原始 Word 文档 → title_convert.py → paragraph_chunks.py → Step 0 (候选块生成) → Step 1 (语义分析) → Step 2 (对象抽取) → 结构化输出
 ```
 
 ## 环境要求
@@ -57,7 +57,7 @@ llm_model/
   └── qwen2.5-7b/
       ├── Qwen2.5-7B-Instruct-Q4_0.gguf
       ├── Modelfile            # Step 1 模型配置
-      └── Modelfile_step2       # Step 2 模型配置
+      └── Modelfile_candidate  # Step 2 模型配置
 ```
 
 **注意**: `.gguf` 文件通常较大（数GB），建议从官方渠道或 HuggingFace 下载。
@@ -76,8 +76,11 @@ ollama create qwen2.5-7b-step1 -f Modelfile
 **Step 2 模型（对象抽取）：**
 
 ```bash
-ollama create qwen2.5-7b-step2 -f Modelfile_step2
+ollama create qwen2.5-7b-step2 -f Modelfile_candidate
 ```
+
+> 说明：你可以替换为其他本地 LLM（如其他 Qwen/Llama/Mistral 变体）。
+> 只需保证 `step1.py` 与 `step2.py` 中的 `MODEL_NAME` 和你 `ollama create` 的模型名一致，并在对应 `Modelfile` 中调整 `FROM` 指向正确模型文件。
 
 验证模型是否创建成功：
 
@@ -113,7 +116,25 @@ curl http://localhost:11434/api/chat -d '{
 
 ## 使用指南
 
-### Step 0: 段落切分（手动或预处理）
+### Pre-Step: Word 预处理与章节切分
+
+在进入 Step 0 之前，建议先完成以下两步：
+
+1. 运行 `title_convert.py`：修正 Word 文档中的标题样式（便于后续按标题分层）
+2. 运行 `paragraph_chunks.py`：将处理后的 Word 按章节转换为 `jsonl`
+
+示例命令：
+
+```bash
+python title_convert.py
+python paragraph_chunks.py
+```
+
+完成后会得到如 `data/full.jsonl` 的章节输入文件。
+
+---
+
+### Step 0: 候选块生成
 
 将原始文档按章节结构切分为段落，输出为 JSONL 或 JSON 格式：
 
@@ -125,7 +146,7 @@ curl http://localhost:11434/api/chat -d '{
 
 **输出**: `output/paragraph_blocks.json`
 
-> **注意**: 本项目中 Step 0 通常由外部工具或脚本完成，如 `demo.py` 或其他文档解析工具。
+> **注意**: 本项目当前推荐使用 `paragraph_chunks.py` 先生成 `data/full.jsonl`，再由 `step0.py` 读取并生成 `output/paragraph_blocks.json`。
 
 ---
 
@@ -281,7 +302,9 @@ python pipeline_integration/candidate_to_md.py \
 semantic_pipeline/
 ├── README.md                   # 本文档
 ├── .gitignore                  # Git 忽略规则
-├── step0.py                    # (可选) 段落切分入口
+├── title_convert.py            # Word 标题样式修正
+├── paragraph_chunks.py         # Word/章节文本 -> JSONL
+├── step0.py                    # Step 0: 候选块生成入口
 ├── step1.py                    # Step 1: 语义分析主程序
 ├── step2.py                    # Step 2: 对象抽取主程序
 ├── demo.py                     # 演示脚本（段落切分 + 候选块生成）
@@ -293,7 +316,7 @@ semantic_pipeline/
 │   └── qwen2.5-7b/
 │       ├── Qwen2.5-7B-Instruct-Q4_0.gguf  # 模型权重
 │       ├── Modelfile           # Step 1 模型配置
-│       └── Modelfile_step2     # Step 2 模型配置
+│       └── Modelfile_candidate # Step 2 模型配置
 ├── semantic_block/
 │   ├── models.py               # 数据模型定义 (Section, CandidateBlock)
 │   └── builder.py              # 候选块构建逻辑
@@ -340,7 +363,7 @@ semantic_pipeline/
 
 ### Q3: 如何调整模型参数？
 
-在 `Modelfile` 或 `Modelfile_step2` 中修改：
+在 `Modelfile` 或 `Modelfile_candidate` 中修改：
 
 ```
 PARAMETER temperature 0.3      # 降低随机性
