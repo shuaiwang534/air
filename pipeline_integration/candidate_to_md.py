@@ -25,25 +25,23 @@ ChunkID strategy (stable):
 chunk_id = f"{doc_id}:{section_id}:idx{index}"
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, List
 
 
 def safe_str(x: Any) -> str:
     return x if isinstance(x, str) else ""
 
 
-def safe_list(x: Any) -> list:
+def safe_list(x: Any) -> List:
     return x if isinstance(x, list) else []
 
 
-def safe_list_str(x: Any) -> list[str]:
+def safe_list_str(x: Any) -> List[str]:
     if isinstance(x, list):
         return [safe_str(i) for i in x if isinstance(i, str)]
     return []
@@ -58,7 +56,7 @@ def sanitize_filename(name: str, max_len: int = 120) -> str:
     return name or "untitled"
 
 
-def load_candidates(path: Path) -> list[Dict[str, Any]]:
+def load_candidates(path: Path) -> List[Dict[str, Any]]:
     """Load candidate_blocks JSON array"""
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -80,14 +78,14 @@ def render_markdown(
     doc_id: str,
     section_id: str,
     title: str,
-    path_list: list[str],
+    path_list: List[str],
     chunk_id: str,
     system_tag: str,
     content: str,
-    components: list[Dict[str, Any]],
-    interfaces: list[Dict[str, Any]],
-    functions: list[Dict[str, Any]],
-    logic_rules: list[Dict[str, Any]],
+    components: List[Dict[str, Any]],
+    interfaces: List[Dict[str, Any]],
+    functions: List[Dict[str, Any]],
+    logic_rules: List[Dict[str, Any]],
 ) -> str:
     """Render candidate block as Markdown with object extraction results"""
     path_str = " > ".join([p for p in path_list if p]) if path_list else ""
@@ -203,7 +201,7 @@ def main() -> None:
 
     candidates = load_candidates(in_path)
     
-    combined_md_parts: list[str] = []
+    combined_md_parts: List[str] = []
     multi_dir = out_dir / "chunks"
     if args.mode in ("multi", "both"):
         multi_dir.mkdir(parents=True, exist_ok=True)

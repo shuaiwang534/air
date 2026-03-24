@@ -74,40 +74,13 @@ def _is_table(text: str) -> bool:
 
 
 def heuristic_split(paragraph_text: str) -> List[Candidate]:
-    """
-    对单个段落进行规则触发切分
-    """
-    base = paragraph_text.strip()
+    base = paragraph_text
     if not base:
         return []
-
-    # 图/表注，原样返回，交给后续过滤
     if _FIGURE_PATTERN.match(base):
         return [Candidate(text=base, order=1, source="figure")]
-    
-    # 表格检测 - 如果整个段落被标记为表格或包含 | 符号的多行
     if _is_table(base):
         return [Candidate(text=base, order=1, source="table")]
-    
-    # 单行表格数据检测 - 包含 | 符号且不是标准段落
     if "|" in base and not ";" in base and base.count("|") >= 1:
         return [Candidate(text=base, order=1, source="table")]
-
-    enum_blocks = _split_by_enum(base)
-
-    results: List[Candidate] = []
-    order = 1
-
-    for eb in enum_blocks:
-        semi_blocks = _split_by_semicolon(eb)
-
-        if len(enum_blocks) > 1:
-            src = "enum+semi" if len(semi_blocks) > 1 else "enum"
-        else:
-            src = "semi" if len(semi_blocks) > 1 else "para"
-
-        for sb in semi_blocks:
-            results.append(Candidate(text=sb, order=order, source=src))
-            order += 1
-
-    return results
+    return [Candidate(text=base, order=1, source="para")]
