@@ -12,14 +12,16 @@ Run full MBSE pipeline in one command:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import step0
 import step1
 import step2
+import table_pipeline
 from pipeline_integration import candidate_to_md
 from pipeline_integration import section_build
 
@@ -37,6 +39,25 @@ def _derive_doc_id(input_doc: str, doc_id: Optional[str]) -> str:
     if doc_id:
         return doc_id
     return Path(input_doc).stem or "DOC"
+
+
+def _load_json_array(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+def _dump_json(path: str, payload: Any) -> None:
+    out_dir = os.path.dirname(path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def run_pipeline(
@@ -60,6 +81,10 @@ def run_pipeline(
     paragraph_file = os.path.join(output_dir, "paragraph_blocks.json")
     semantic_file = os.path.join(output_dir, "semantic_blocks.json")
     candidate_file = os.path.join(output_dir, "candidate_blocks.json")
+    tables_raw_file = os.path.join(output_dir, "tables_raw.jsonl")
+    table_summary_file = os.path.join(output_dir, "table_summary.json")
+    table_candidates_file = os.path.join(output_dir, "table_candidates.json")
+    merged_candidate_file = os.path.join(output_dir, "candidate_blocks_merged.json")
 
     print("\n========== PARAGRAPH_CHUNKS ==========")
     import paragraph_chunks
@@ -72,6 +97,7 @@ def run_pipeline(
     use_doc_id = _derive_doc_id(input_doc=input_doc, doc_id=doc_id)
     paragraph_chunks.INPUT_DOCX = input_doc
     paragraph_chunks.OUTPUT_JSONL = section_jsonl
+    paragraph_chunks.OUTPUT_TABLES_JSONL = tables_raw_file
     paragraph_chunks.main()
 
     print("\n========== STEP 0 ==========")
@@ -90,6 +116,26 @@ def run_pipeline(
     step2.OLLAMA_URL = base_url
     step2.MODEL_NAME = model
     step2.main()
+
+    print("\n========== TABLE PIPELINE ==========")
+    table_pipeline.run_table_pipeline(
+        input_file=tables_raw_file,
+        summary_output=table_summary_file,
+        candidates_output=table_candidates_file,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        use_llm=True,
+    )
+
+    print("\n========== MERGE CANDIDATES ==========")
+    text_candidates = _load_json_array(candidate_file)
+    table_candidates = _load_json_array(table_candidates_file)
+    merged_candidates = text_candidates + table_candidates
+    _dump_json(merged_candidate_file, merged_candidates)
+    print("  text candidates : {0}".format(len(text_candidates)))
+    print("  table candidates: {0}".format(len(table_candidates)))
+    print("  merged total    : {0}".format(len(merged_candidates)))
 
     if build_section_md:
         print("\n========== SECTION_BUILD ==========")
@@ -115,7 +161,7 @@ def run_pipeline(
             [
                 "candidate_to_md.py",
                 "--in",
-                candidate_file,
+                merged_candidate_file,
                 "--out",
                 candidate_md_dir,
                 "--mode",
@@ -131,12 +177,16 @@ def run_pipeline(
     print("[OUT] paragraph     : {0}".format(Path(paragraph_file).resolve()))
     print("[OUT] semantic      : {0}".format(Path(semantic_file).resolve()))
     print("[OUT] candidate     : {0}".format(Path(candidate_file).resolve()))
+    print("[OUT] tables raw    : {0}".format(Path(tables_raw_file).resolve()))
+    print("[OUT] table summary : {0}".format(Path(table_summary_file).resolve()))
+    print("[OUT] table cand    : {0}".format(Path(table_candidates_file).resolve()))
+    print("[OUT] merged cand   : {0}".format(Path(merged_candidate_file).resolve()))
     if build_section_md:
         print("[OUT] section md    : {0}".format(Path(section_md_dir).resolve()))
     if build_candidate_md:
         print("[OUT] candidate md  : {0}".format(Path(candidate_md_dir).resolve()))
 
-    return candidate_file
+    return merged_candidate_file
 
 
 def main():

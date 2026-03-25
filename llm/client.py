@@ -199,6 +199,26 @@ class OllamaClient:
                 "LLM 返回内容不是有效 JSON: {0}\n原始内容:\n{1}".format(e, content)
             )
 
+    def rewrite_table_row(
+        self,
+        row_payload: Dict[str, Any],
+        system_prompt: str,
+        temperature: float = 0.1,
+    ) -> Dict[str, Any]:
+        """Run LLM rewrite for a single table row and return JSON object."""
+        prompt = json.dumps(row_payload, ensure_ascii=False, indent=2)
+        response = self.chat(
+            prompt=prompt,
+            system=system_prompt,
+            temperature=temperature,
+            stream=False,
+        )
+        content = self.extract_content(response)
+        parsed = self.parse_json_response(content)
+        if not isinstance(parsed, dict):
+            raise ValueError("table rewrite response must be a JSON object")
+        return parsed
+
 
 def create_client(
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",

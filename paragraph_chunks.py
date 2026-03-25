@@ -3,7 +3,7 @@ import re
 import json
 import os
 import tempfile
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
@@ -19,6 +19,7 @@ except Exception:
 
 INPUT_DOCX = "校验部分.doc"   # 这里现在也可以填 .doc
 OUTPUT_JSONL = "section_chunks.jsonl"
+OUTPUT_TABLES_JSONL = "output/tables_raw.jsonl"
 
 
 def convert_doc_to_docx(src_path, dst_path):
@@ -182,13 +183,54 @@ def parse_heading(text):
     return None, text
 
 
-def extract_table_text(table):
-    """提取表格内容, 转为文本表示"""
-    lines = []
+def _clean_cell_text(text: str) -> str:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def extract_table_rows(table: Table) -> List[List[str]]:
+    rows: List[List[str]] = []
     for row in table.rows:
-        cells = [cell.text.strip() for cell in row.cells]
-        lines.append(" | ".join(cells))
-    return "\n".join(lines)
+        rows.append([_clean_cell_text(cell.text) for cell in row.cells])
+    return rows
+
+
+def extract_table_text(raw_rows: List[List[str]]) -> str:
+    """提取表格内容, 转为文本表示"""
+    lines = [" | ".join(row).strip() for row in raw_rows]
+    return "\n".join([line for line in lines if line])
+
+
+def build_table_record(
+    table: Table,
+    table_id: str,
+    current_section: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    raw_rows = extract_table_rows(table)
+    header = raw_rows[0] if raw_rows else []
+    rows = raw_rows[1:] if len(raw_rows) > 1 else []
+    raw_text = extract_table_text(raw_rows)
+
+    section_id = ""
+    title = ""
+    path: List[str] = []
+    if current_section:
+        section_id = current_section.get("section_id") or ""
+        title = current_section.get("title") or ""
+        path = current_section.get("path") or []
+
+    return {
+        "table_id": table_id,
+        "section_id": section_id,
+        "title": title,
+        "path": path,
+        "header": header,
+        "rows": rows,
+        "raw_rows": raw_rows,
+        "raw_text": raw_text,
+    }
 
 
 def iter_block_items(doc):
@@ -441,10 +483,12 @@ def preprocess_document(doc):
 # =========================
 # 正文切分
 # =========================
-def build_section_chunks(doc):
-    chunks = []
+def build_section_chunks(doc) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    chunks: List[Dict[str, Any]] = []
+    table_records: List[Dict[str, Any]] = []
     heading_stack = []   # [{"level": 1, "title": "..."}]
     current = None
+    table_index = 0
 
     for elem_type, elem in iter_block_items(doc):
         if elem_type == "paragraph":
@@ -478,17 +522,26 @@ def build_section_chunks(doc):
                 current["content_lines"].append(text)
 
         elif elem_type == "table":
-            if current:
-                table_text = extract_table_text(elem)
-                if table_text:
-                    current["content_lines"].append("[表格]")
-                    current["content_lines"].append(table_text)
+            if not current:
+                continue
+
+            table_index += 1
+            section_id = current.get("section_id") or "NO_SECTION"
+            table_id = "{0}-T{1:03d}".format(section_id, table_index)
+
+            table_record = build_table_record(
+                table=elem,
+                table_id=table_id,
+                current_section=current,
+            )
+            table_records.append(table_record)
+            current["content_lines"].append("[表格引用:{0}]".format(table_id))
 
     for c in chunks:
         c["content"] = "\n".join(c["content_lines"]).strip()
         del c["content_lines"]
 
-    return chunks
+    return chunks, table_records
 
 
 def main():
@@ -499,13 +552,22 @@ def main():
         doc, temp_docx = load_document_any(INPUT_DOCX)
 
         preprocess_document(doc)
-        chunks = build_section_chunks(doc)
+        chunks, table_records = build_section_chunks(doc)
 
+        out_dir = os.path.dirname(OUTPUT_JSONL) or "."
+        os.makedirs(out_dir, exist_ok=True)
         with open(OUTPUT_JSONL, "w", encoding="utf-8") as f:
             for c in chunks:
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
 
+        table_dir = os.path.dirname(OUTPUT_TABLES_JSONL) or "."
+        os.makedirs(table_dir, exist_ok=True)
+        with open(OUTPUT_TABLES_JSONL, "w", encoding="utf-8") as f:
+            for t in table_records:
+                f.write(json.dumps(t, ensure_ascii=False) + "\n")
+
         print("生成章节数：{0}".format(len(chunks)))
+        print("生成表格数：{0}".format(len(table_records)))
 
     finally:
         if temp_docx and os.path.exists(temp_docx):
