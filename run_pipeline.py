@@ -40,9 +40,7 @@ RUN_DEFAULTS: Dict[str, Any] = {
     "skip_candidate_md": False,
     "section_md_dir": "ragflow_evidence",
     "candidate_md_dir": "ragflow_evidence_candidates",
-    "text_token_budget": 240,
-    "table_token_budget": 220,
-    "table_group_size": 6,
+    "chunk_token_budget": 240,
 }
 
 
@@ -117,14 +115,10 @@ def run_pipeline(
     build_candidate_md: bool = not RUN_DEFAULTS["skip_candidate_md"],
     section_md_dir: str = RUN_DEFAULTS["section_md_dir"],
     candidate_md_dir: str = RUN_DEFAULTS["candidate_md_dir"],
-    text_token_budget: int = RUN_DEFAULTS["text_token_budget"],
-    table_token_budget: int = RUN_DEFAULTS["table_token_budget"],
-    table_group_size: int = RUN_DEFAULTS["table_group_size"],
+    chunk_token_budget: int = RUN_DEFAULTS["chunk_token_budget"],
 ) -> str:
-    if table_group_size <= 0:
-        table_group_size = 6
-    if text_token_budget <= 0:
-        text_token_budget = int(RUN_DEFAULTS["text_token_budget"])
+    if chunk_token_budget <= 0:
+        chunk_token_budget = int(RUN_DEFAULTS["chunk_token_budget"])
 
     if api_key:
         os.environ["DASHSCOPE_API_KEY"] = api_key
@@ -158,7 +152,7 @@ def run_pipeline(
     step0.run_step0(
         input_jsonl=section_jsonl,
         output_file=paragraph_file,
-        token_budget=text_token_budget,
+        token_budget=chunk_token_budget,
     )
 
     print("\n========== STEP 1 ==========")
@@ -184,8 +178,7 @@ def run_pipeline(
         model=model,
         api_key=api_key,
         use_llm=False,
-        group_token_budget=table_token_budget,
-        group_size=table_group_size,
+        group_token_budget=chunk_token_budget,
     )
 
     print("\n========== MERGE CANDIDATES ==========")
@@ -267,9 +260,7 @@ def main():
     parser.add_argument("--skip-candidate-md", action="store_true", default=RUN_DEFAULTS["skip_candidate_md"], help="Skip candidate JSON -> markdown")
     parser.add_argument("--section-md-dir", default=RUN_DEFAULTS["section_md_dir"], help="Output dir for section markdown")
     parser.add_argument("--candidate-md-dir", default=RUN_DEFAULTS["candidate_md_dir"], help="Output dir for candidate markdown")
-    parser.add_argument("--text-token-budget", type=int, default=RUN_DEFAULTS["text_token_budget"], help="Token budget per merged text chunk before Step1 LLM")
-    parser.add_argument("--table-token-budget", type=int, default=RUN_DEFAULTS["table_token_budget"], help="Token budget per merged table chunk")
-    parser.add_argument("--table-group-size", type=int, default=RUN_DEFAULTS["table_group_size"], help="Fallback rows per table group when table token budget <= 0")
+    parser.add_argument("--chunk-token-budget", type=int, default=RUN_DEFAULTS["chunk_token_budget"], help="Unified token upper bound for both text and table chunking")
     args = parser.parse_args()
 
     run_pipeline(
@@ -284,9 +275,7 @@ def main():
         build_candidate_md=not args.skip_candidate_md,
         section_md_dir=args.section_md_dir,
         candidate_md_dir=args.candidate_md_dir,
-        text_token_budget=args.text_token_budget,
-        table_token_budget=args.table_token_budget,
-        table_group_size=args.table_group_size,
+        chunk_token_budget=args.chunk_token_budget,
     )
 
 

@@ -291,13 +291,11 @@ def _build_group_faithful_text(header: List[str], rows: List[Dict[str, Any]]) ->
 
 def _group_rows_by_table(
     rows: List[Dict[str, Any]],
-    group_size: int,
     group_token_budget: int,
 ) -> List[Dict[str, Any]]:
-    size = int(group_size or 0)
-    if size <= 0:
-        size = 6
     token_budget = int(group_token_budget or 0)
+    if token_budget <= 0:
+        token_budget = int(DEFAULT_GROUP_TOKEN_BUDGET)
 
     groups: List[Dict[str, Any]] = []
     table_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -327,6 +325,7 @@ def _group_rows_by_table(
         row_token_estimates = [int(x.get("row_token_estimate", 0) or 0) for x in chunk_rows]
         faithful_text = _build_group_faithful_text(header, chunk_rows)
         token_estimate = estimate_tokens(faithful_text)
+        has_oversize_row = any([x > token_budget for x in row_token_estimates])
         return {
             "table_id": table_id,
             "section_id": _clean_text(first.get("section_id", "")),
@@ -344,6 +343,7 @@ def _group_rows_by_table(
             "faithful_text": faithful_text,
             "token_estimate": token_estimate,
             "token_budget": token_budget,
+            "has_oversize_row": has_oversize_row,
         }
 
     for table_id in table_order:
@@ -353,38 +353,39 @@ def _group_rows_by_table(
         )
         chunk_index = 0
 
-        # Preferred mode: group by total token budget.
-        if token_budget > 0:
-            buf: List[Dict[str, Any]] = []
-            for row in items:
-                if not buf:
-                    buf = [row]
-                    continue
+        buf: List[Dict[str, Any]] = []
+        buf_token_sum = 0
+        for row in items:
+            row_tokens = int(row.get("row_token_estimate", 0) or 0)
 
-                trial_rows = buf + [row]
-                trial_tokens = sum(
-                    [int(x.get("row_token_estimate", 0) or 0) for x in trial_rows]
-                )
-
-                if trial_tokens <= token_budget:
-                    buf.append(row)
-                else:
+            # Oversize row should occupy a dedicated chunk.
+            if row_tokens > token_budget:
+                if buf:
                     chunk_index += 1
                     groups.append(build_group_record(table_id, chunk_index, buf))
-                    buf = [row]
+                    buf = []
+                    buf_token_sum = 0
+                chunk_index += 1
+                groups.append(build_group_record(table_id, chunk_index, [row]))
+                continue
 
-            if buf:
+            if not buf:
+                buf = [row]
+                buf_token_sum = row_tokens
+                continue
+
+            if buf_token_sum + row_tokens <= token_budget:
+                buf.append(row)
+                buf_token_sum += row_tokens
+            else:
                 chunk_index += 1
                 groups.append(build_group_record(table_id, chunk_index, buf))
-            continue
+                buf = [row]
+                buf_token_sum = row_tokens
 
-        # Fallback mode: fixed row count.
-        for start in range(0, len(items), size):
-            chunk_rows = items[start:start + size]
-            if not chunk_rows:
-                continue
+        if buf:
             chunk_index += 1
-            groups.append(build_group_record(table_id, chunk_index, chunk_rows))
+            groups.append(build_group_record(table_id, chunk_index, buf))
 
     return groups
 
@@ -413,6 +414,7 @@ def _chunk_sentence_to_candidate(chunk_item: Dict[str, Any]) -> Dict[str, Any]:
         "row_token_sum": int(chunk_item.get("row_token_sum", 0) or 0),
         "token_estimate": int(chunk_item.get("token_estimate", 0) or 0),
         "token_budget": int(chunk_item.get("token_budget", 0) or 0),
+        "has_oversize_row": bool(chunk_item.get("has_oversize_row", False)),
     }
 
 
@@ -425,7 +427,6 @@ def run_table_pipeline(
     api_key: Optional[str] = None,
     use_llm: bool = False,
     group_token_budget: int = DEFAULT_GROUP_TOKEN_BUDGET,
-    group_size: int = 6,
 ) -> List[Dict[str, Any]]:
     rows = _load_jsonl(input_file)
     print("table rows loaded: {0}".format(len(rows)))
@@ -443,7 +444,6 @@ def run_table_pipeline(
 
     sentence_rows = _group_rows_by_table(
         rewritten_rows,
-        group_size=group_size,
         group_token_budget=group_token_budget,
     )
 
@@ -454,10 +454,7 @@ def run_table_pipeline(
 
     print("table groups: {0}".format(len(sentence_rows)))
     print("table candidates: {0}".format(len(candidates)))
-    if int(group_token_budget or 0) > 0:
-        print("group mode: token_budget={0}".format(int(group_token_budget)))
-    else:
-        print("group mode: row_size={0}".format(int(group_size)))
+    print("group mode: token_budget={0}".format(int(group_token_budget or 0)))
     print("[OUT] sentences : {0}".format(os.path.abspath(sentences_output)))
     print("[OUT] candidates: {0}".format(os.path.abspath(candidates_output)))
     return candidates
@@ -471,8 +468,7 @@ def main() -> None:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="LLM base URL")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="LLM model")
     parser.add_argument("--api-key", default=None, help="API key")
-    parser.add_argument("--group-token-budget", type=int, default=DEFAULT_GROUP_TOKEN_BUDGET, help="Preferred token budget per merged group (<=0 to disable)")
-    parser.add_argument("--group-size", type=int, default=6, help="Fallback rows per merged group when token budget <= 0")
+    parser.add_argument("--group-token-budget", type=int, default=DEFAULT_GROUP_TOKEN_BUDGET, help="Token budget per merged group")
     parser.add_argument("--use-llm", action="store_true", help="Enable LLM rewrite (default: disabled)")
     parser.add_argument("--no-llm", action="store_true", help="Force disable LLM rewrite")
     args = parser.parse_args()
@@ -486,7 +482,6 @@ def main() -> None:
         api_key=args.api_key,
         use_llm=(args.use_llm and not args.no_llm),
         group_token_budget=args.group_token_budget,
-        group_size=args.group_size,
     )
 
 

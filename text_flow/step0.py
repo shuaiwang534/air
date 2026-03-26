@@ -1,11 +1,11 @@
 # semantic_pipeline/step0.py
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List
 
 from io_utils import load_sections
-from semantic_block.builder import build_candidates
 from token_utils import estimate_tokens
 
 
@@ -25,84 +25,197 @@ def _safe_print(text: str) -> None:
         print(safe)
 
 
-def _merge_candidates_within_section(
-    raw_items: List[Dict[str, Any]],
-    token_budget: int,
-) -> List[Dict[str, Any]]:
-    if not raw_items:
+def _split_section_into_paragraphs(text: str) -> List[str]:
+    if text is None:
+        return []
+
+    normalized = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+
+    # Prefer blank-line paragraph boundaries.
+    if re.search(r"\n\s*\n", normalized):
+        raw_parts = re.split(r"\n\s*\n+", normalized)
+    else:
+        raw_parts = normalized.split("\n")
+
+    return [p.strip() for p in raw_parts if p and p.strip()]
+
+
+def _split_text_by_token_budget(text: str, token_budget: int) -> List[str]:
+    t = str(text or "").strip()
+    if not t:
         return []
 
     budget = _normalize_budget(token_budget)
-    merged: List[Dict[str, Any]] = []
-    buf: List[Dict[str, Any]] = []
-    next_order = 1
+    parts: List[str] = []
+    buf = ""
 
-    def flush_buffer() -> None:
-        nonlocal buf, next_order
+    for ch in t:
+        trial = buf + ch
+        if buf and estimate_tokens(trial) > budget:
+            part = buf.strip()
+            if part:
+                parts.append(part)
+            buf = ch
+        else:
+            buf = trial
+
+    if buf.strip():
+        parts.append(buf.strip())
+
+    return parts if parts else [t]
+
+
+def _split_oversize_paragraph(paragraph: str, token_budget: int) -> List[str]:
+    text = str(paragraph or "").strip()
+    if not text:
+        return []
+
+    budget = _normalize_budget(token_budget)
+    if estimate_tokens(text) <= budget:
+        return [text]
+
+    # First try sentence-like boundaries.
+    sentences = [
+        s.strip()
+        for s in re.split(r"(?<=[\u3002\uff01\uff1f!?；;：:])", text)
+        if s and s.strip()
+    ]
+    if len(sentences) <= 1:
+        return _split_text_by_token_budget(text, budget)
+
+    units: List[str] = []
+    for sent in sentences:
+        if estimate_tokens(sent) <= budget:
+            units.append(sent)
+        else:
+            units.extend(_split_text_by_token_budget(sent, budget))
+
+    packed: List[str] = []
+    buf = ""
+    for unit in units:
         if not buf:
-            return
+            buf = unit
+            continue
+        trial = buf + unit
+        if estimate_tokens(trial) <= budget:
+            buf = trial
+        else:
+            if buf.strip():
+                packed.append(buf.strip())
+            buf = unit
 
-        first = buf[0]
-        text = "\n".join([x["text"] for x in buf if x["text"]]).strip()
-        if not text:
-            buf = []
-            return
+    if buf.strip():
+        packed.append(buf.strip())
 
-        merged.append(
+    return packed if packed else _split_text_by_token_budget(text, budget)
+
+
+def _pack_section_content(section: Any, token_budget: int) -> List[Dict[str, Any]]:
+    budget = _normalize_budget(token_budget)
+    content = str(getattr(section, "content", "") or "").strip()
+    if not content:
+        return []
+
+    section_id = getattr(section, "section_id", "")
+    title = getattr(section, "title", "")
+    path = getattr(section, "path", [])
+    if not isinstance(path, list):
+        path = []
+
+    full_section_token_estimate = estimate_tokens(content)
+    paragraphs = _split_section_into_paragraphs(content)
+    if not paragraphs:
+        paragraphs = [content]
+
+    if full_section_token_estimate <= budget:
+        text = "\n\n".join(paragraphs).strip()
+        return [
             {
-                "section_id": first["section_id"],
-                "title": first["title"],
-                "path": first["path"],
-                "order": next_order,
+                "section_id": section_id,
+                "title": title,
+                "path": path,
+                "order": 1,
+                "chunk_index": 1,
                 "text": text,
-                "source": first["source"] if len(set([x["source"] for x in buf])) == 1 else "merged",
+                "source": "section_pack",
                 "token_estimate": estimate_tokens(text),
-                "part_count": len(buf),
                 "token_budget": budget,
+                "part_count": len(paragraphs) if paragraphs else 1,
+                "full_section_token_estimate": full_section_token_estimate,
+                "para_start": 1,
+                "para_end": len(paragraphs) if paragraphs else 1,
+                "is_whole_section": True,
+            }
+        ]
+
+    units: List[Dict[str, Any]] = []
+    for idx, para in enumerate(paragraphs, start=1):
+        para_text = str(para or "").strip()
+        if not para_text:
+            continue
+
+        if estimate_tokens(para_text) <= budget:
+            units.append({"text": para_text, "para_index": idx})
+            continue
+
+        split_parts = _split_oversize_paragraph(para_text, budget)
+        for part in split_parts:
+            part_text = str(part or "").strip()
+            if part_text:
+                units.append({"text": part_text, "para_index": idx})
+
+    if not units:
+        return []
+
+    def build_chunk_text(chunk_units: List[Dict[str, Any]]) -> str:
+        return "\n\n".join([x["text"] for x in chunk_units if x.get("text")]).strip()
+
+    chunk_units_list: List[List[Dict[str, Any]]] = []
+    buf_units: List[Dict[str, Any]] = []
+
+    for unit in units:
+        if not buf_units:
+            buf_units = [unit]
+            continue
+
+        trial_units = buf_units + [unit]
+        trial_text = build_chunk_text(trial_units)
+        if estimate_tokens(trial_text) <= budget:
+            buf_units = trial_units
+        else:
+            chunk_units_list.append(buf_units)
+            buf_units = [unit]
+
+    if buf_units:
+        chunk_units_list.append(buf_units)
+
+    packed: List[Dict[str, Any]] = []
+    for idx, chunk_units in enumerate(chunk_units_list, start=1):
+        text = build_chunk_text(chunk_units)
+        para_indexes = [int(x.get("para_index", 0) or 0) for x in chunk_units]
+        para_indexes = [x for x in para_indexes if x > 0]
+        packed.append(
+            {
+                "section_id": section_id,
+                "title": title,
+                "path": path,
+                "order": idx,
+                "chunk_index": idx,
+                "text": text,
+                "source": "section_pack",
+                "token_estimate": estimate_tokens(text),
+                "token_budget": budget,
+                "part_count": len(chunk_units),
+                "full_section_token_estimate": full_section_token_estimate,
+                "para_start": min(para_indexes) if para_indexes else 0,
+                "para_end": max(para_indexes) if para_indexes else 0,
+                "is_whole_section": False,
             }
         )
-        next_order += 1
-        buf = []
 
-    for item in raw_items:
-        source = str(item.get("source") or "").strip().lower()
-        item_text = str(item.get("text") or "").strip()
-        if not item_text:
-            continue
-
-        # Keep figure/table boundaries intact.
-        if source in ("figure", "table"):
-            flush_buffer()
-            merged.append(
-                {
-                    "section_id": item["section_id"],
-                    "title": item["title"],
-                    "path": item["path"],
-                    "order": next_order,
-                    "text": item_text,
-                    "source": item["source"],
-                    "token_estimate": estimate_tokens(item_text),
-                    "part_count": 1,
-                    "token_budget": budget,
-                }
-            )
-            next_order += 1
-            continue
-
-        if not buf:
-            buf = [item]
-            continue
-
-        same_source = str(buf[0].get("source")) == str(item.get("source"))
-        candidate_text = ("\n".join([x["text"] for x in buf] + [item_text])).strip()
-        if same_source and estimate_tokens(candidate_text) <= budget:
-            buf.append(item)
-        else:
-            flush_buffer()
-            buf = [item]
-
-    flush_buffer()
-    return merged
+    return packed
 
 
 def run_step0(
@@ -113,34 +226,25 @@ def run_step0(
     sections = load_sections(input_jsonl)
     use_budget = _normalize_budget(token_budget)
 
-    output_data = []
+    output_data: List[Dict[str, Any]] = []
     for sec in sections:
         _safe_print("\n=== Section {0} | {1} ===".format(sec.section_id, sec.title))
 
-        cands = build_candidates(sec)
-        if not cands:
-            _safe_print("(no candidates)")
+        packed_items = _pack_section_content(sec, token_budget=use_budget)
+        if not packed_items:
+            _safe_print("(no content)")
             continue
 
-        raw_items: List[Dict[str, Any]] = []
-        for c in cands:
-            raw_items.append({
-                "section_id": c.section_id,
-                "title": c.title,
-                "path": c.path,
-                "order": c.order,
-                "text": c.text,
-                "source": c.source,
-            })
-
-        merged_items = _merge_candidates_within_section(raw_items, token_budget=use_budget)
+        full_section_token = int(packed_items[0].get("full_section_token_estimate", 0) or 0)
+        chunk_tokens = [int(x.get("token_estimate", 0) or 0) for x in packed_items]
         _safe_print(
-            "raw={0} merged={1} budget={2}".format(
-                len(raw_items), len(merged_items), use_budget
+            "full_token={0} chunks={1} budget={2}".format(
+                full_section_token, len(packed_items), use_budget
             )
         )
+        _safe_print("chunk_tokens={0}".format(chunk_tokens))
 
-        for item in merged_items:
+        for item in packed_items:
             preview = str(item.get("text", "")).replace("\n", " | ").strip()
             if len(preview) > 180:
                 preview = preview[:177] + "..."
@@ -163,6 +267,11 @@ def run_step0(
                 "token_estimate": item["token_estimate"],
                 "part_count": item["part_count"],
                 "token_budget": item["token_budget"],
+                "full_section_token_estimate": item["full_section_token_estimate"],
+                "chunk_index": item["chunk_index"],
+                "para_start": item.get("para_start", 0),
+                "para_end": item.get("para_end", 0),
+                "is_whole_section": bool(item.get("is_whole_section", False)),
             })
 
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
