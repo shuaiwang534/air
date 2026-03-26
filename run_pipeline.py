@@ -40,7 +40,7 @@ RUN_DEFAULTS: Dict[str, Any] = {
     "skip_candidate_md": False,
     "section_md_dir": "ragflow_evidence",
     "candidate_md_dir": "ragflow_evidence_candidates",
-    "chunk_token_budget": 240,
+    "chunk_token_budget": 10000,
 }
 
 
@@ -243,6 +243,8 @@ def run_pipeline(
 
 
 def main():
+    # Fixed config point: change this one value when you want to adjust chunk size.
+    fixed_chunk_token_budget = 10000
     parser = argparse.ArgumentParser(description="Run full MBSE pipeline in one command.")
     parser.add_argument(
         "--input-doc",
@@ -260,7 +262,7 @@ def main():
     parser.add_argument("--skip-candidate-md", action="store_true", default=RUN_DEFAULTS["skip_candidate_md"], help="Skip candidate JSON -> markdown")
     parser.add_argument("--section-md-dir", default=RUN_DEFAULTS["section_md_dir"], help="Output dir for section markdown")
     parser.add_argument("--candidate-md-dir", default=RUN_DEFAULTS["candidate_md_dir"], help="Output dir for candidate markdown")
-    parser.add_argument("--chunk-token-budget", type=int, default=RUN_DEFAULTS["chunk_token_budget"], help="Unified token upper bound for both text and table chunking")
+    parser.add_argument("--chunk-token-budget", type=int, default=fixed_chunk_token_budget, help="Unified token upper bound for both text and table chunking")
     args = parser.parse_args()
 
     run_pipeline(

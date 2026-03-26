@@ -1,4 +1,4 @@
-# semantic_pipeline/step0.py
+﻿# semantic_pipeline/step0.py
 import json
 import os
 import re
@@ -67,6 +67,41 @@ def _split_text_by_token_budget(text: str, token_budget: int) -> List[str]:
     return parts if parts else [t]
 
 
+def _split_by_sentence_delimiters(text: str) -> List[str]:
+    if not text:
+        return []
+
+    # Use Unicode escapes to avoid encoding issues on different environments.
+    end_marks = set([
+        u"\u3002",  # 。
+        u"\uff01",  # ！
+        u"\uff1f",  # ？
+        u"\uff1b",  # ；
+        u"\uff1a",  # ：
+        "!",
+        "?",
+        ";",
+        ":",
+    ])
+    parts: List[str] = []
+    buf: List[str] = []
+
+    for ch in text:
+        buf.append(ch)
+        if ch in end_marks:
+            seg = "".join(buf).strip()
+            if seg:
+                parts.append(seg)
+            buf = []
+
+    if buf:
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+
+    return parts
+
+
 def _split_oversize_paragraph(paragraph: str, token_budget: int) -> List[str]:
     text = str(paragraph or "").strip()
     if not text:
@@ -77,11 +112,7 @@ def _split_oversize_paragraph(paragraph: str, token_budget: int) -> List[str]:
         return [text]
 
     # First try sentence-like boundaries.
-    sentences = [
-        s.strip()
-        for s in re.split(r"(?<=[\u3002\uff01\uff1f!?；;：:])", text)
-        if s and s.strip()
-    ]
+    sentences = _split_by_sentence_delimiters(text)
     if len(sentences) <= 1:
         return _split_text_by_token_budget(text, budget)
 
@@ -287,3 +318,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
