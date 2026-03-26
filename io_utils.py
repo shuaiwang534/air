@@ -20,7 +20,7 @@ def load_sections(jsonl_path: str) -> List[Section]:
 
             sections.append(
                 Section(
-                    section_id=str(obj["section_id"]),
+                    section_id=str(obj.get("section_id", "") or ""),
                     title=obj.get("title", ""),
                     path=obj.get("path", []),
                     content=obj.get("content", "") or ""

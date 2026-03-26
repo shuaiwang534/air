@@ -217,6 +217,47 @@ def parse_heading(text):
     return None, text
 
 
+def _parse_numeric_section_id(section_id):
+    text = str(section_id or "").strip()
+    if not text:
+        return []
+
+    parts = text.split(".")
+    nums = []
+    for p in parts:
+        if not p.isdigit():
+            return []
+        nums.append(int(p))
+    return nums
+
+
+def _sync_section_counters(counters, section_id):
+    nums = _parse_numeric_section_id(section_id)
+    if not nums:
+        return
+
+    counters[:] = nums
+
+
+def _gen_section_id_from_level(level, counters):
+    lvl = int(level or 0)
+    if lvl <= 0:
+        return ""
+
+    while len(counters) < lvl:
+        counters.append(0)
+
+    del counters[lvl:]
+
+    # If parent levels are missing, initialize them to 1.
+    for i in range(lvl - 1):
+        if counters[i] <= 0:
+            counters[i] = 1
+
+    counters[lvl - 1] += 1
+    return ".".join([str(x) for x in counters])
+
+
 def iter_block_items(doc):
     """
     鎸夋枃妗ｇ湡瀹為『搴忛亶鍘嗘钀藉拰琛ㄦ牸銆?
@@ -245,6 +286,33 @@ def _pad_rows(rows):
     out = []
     for row in rows:
         out.append(list(row) + [""] * (width - len(row)))
+    return out
+
+
+def _collapse_repeated_long_cells(cells, min_len=16):
+    """
+    Handle merged-like horizontal repeats from some Word tables:
+    if adjacent columns contain exactly the same long text, keep the first one
+    and clear the trailing duplicates.
+    """
+    out = list(cells)
+    n = len(out)
+    i = 0
+    while i < n:
+        cur = _clean_table_text(out[i])
+        if not cur:
+            i += 1
+            continue
+
+        j = i + 1
+        while j < n and _clean_table_text(out[j]) == cur:
+            j += 1
+
+        if (j - i) >= 2 and len(cur) >= int(min_len):
+            for k in range(i + 1, j):
+                out[k] = ""
+
+        i = j
     return out
 
 
@@ -327,7 +395,7 @@ def build_table_row_records(table, table_id, section_context):
         if not any(_clean_table_text(x) for x in row):
             continue
 
-        cells = list(row)
+        cells = _collapse_repeated_long_cells(list(row))
         local_header = list(header)
 
         if len(cells) < len(local_header):
@@ -590,6 +658,7 @@ def build_section_chunks(doc) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]
     chunks: List[Dict[str, Any]] = []
     table_row_records: List[Dict[str, Any]] = []
     heading_stack = []   # [{"level": 1, "title": "..."}]
+    section_counters: List[int] = []
     current = None
     table_index = 0
 
@@ -603,6 +672,10 @@ def build_section_chunks(doc) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]
 
             if lvl is not None:
                 section_id, title = parse_heading(text)
+                if section_id:
+                    _sync_section_counters(section_counters, section_id)
+                else:
+                    section_id = _gen_section_id_from_level(lvl, section_counters)
 
                 while heading_stack and heading_stack[-1]["level"] >= lvl:
                     heading_stack.pop()
@@ -613,7 +686,7 @@ def build_section_chunks(doc) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]
                 })
 
                 current = {
-                    "section_id": section_id,
+                    "section_id": section_id or "",
                     "title": title,
                     "path": [h["title"] for h in heading_stack],
                     "content_lines": []

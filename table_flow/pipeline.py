@@ -6,7 +6,7 @@ Table row pipeline:
 1) Read output/table_rows.jsonl
 2) Rewrite each row with LLM (faithful, short Chinese sentence)
 3) Write output/table_sentences.jsonl
-4) Build output/table_candidates.json for downstream merge
+4) Build output/table_blocks.json (step0-like blocks)
 """
 
 import argparse
@@ -34,11 +34,11 @@ except Exception:
 
 INPUT_TABLE_ROWS = "output/table_rows.jsonl"
 OUTPUT_TABLE_SENTENCES = "output/table_sentences.jsonl"
-OUTPUT_TABLE_CANDIDATES = "output/table_candidates.json"
+OUTPUT_TABLE_BLOCKS = "output/table_blocks.json"
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "Qwen/Qwen2.5-72B-Instruct"
-DEFAULT_GROUP_TOKEN_BUDGET = 220
+DEFAULT_GROUP_TOKEN_BUDGET = 10000
 
 SYSTEM_PROMPT_TABLE_ROW = """
 你是“工程表格单行忠实改写器”。
@@ -265,29 +265,53 @@ def _extract_group_header(rows: List[Dict[str, Any]]) -> List[str]:
 
 
 def _build_group_faithful_text(header: List[str], rows: List[Dict[str, Any]]) -> str:
-    lines: List[str] = []
-    if header:
-        lines.append("字段：" + "｜".join(header))
-    else:
-        lines.append("字段：")
+    # One line per original row: key:value pairs, then newline for next row.
+    kv_sep = u"\uff1a"
+    pair_sep = u"\uff0c"
+    line_end = u"\u3002"
 
+    lines: List[str] = []
     for row in rows:
         row_map = _normalize_row_map(row.get("row_map", {}))
-        row_index = int(row.get("row_index", 0) or 0)
-        values = []
-        for key in header:
-            values.append(_clean_text(row_map.get(key, "")))
-        if any(values):
-            lines.append("[{0}] {1}".format(row_index, "｜".join(values)))
-        else:
-            fallback = _clean_text(row.get("faithful_text", ""))
-            if fallback:
-                lines.append("[{0}] {1}".format(row_index, fallback))
-            else:
-                lines.append("[{0}]".format(row_index))
+        seen = set()
+        ordered_keys: List[str] = []
+
+        for raw_key in header:
+            key = _clean_text(raw_key)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered_keys.append(key)
+
+        # Keep extra keys from row_map in stable order.
+        for raw_key in row_map.keys():
+            key = _clean_text(raw_key)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered_keys.append(key)
+
+        pairs: List[str] = []
+        for key in ordered_keys:
+            val = _clean_text(row_map.get(key, ""))
+            if not val:
+                continue
+            pairs.append("{0}{1}{2}".format(key, kv_sep, val))
+
+        if pairs:
+            line = pair_sep.join(pairs)
+            if not line.endswith(line_end):
+                line = line + line_end
+            lines.append(line)
+            continue
+
+        fallback = _clean_text(row.get("faithful_text", ""))
+        if fallback:
+            if not fallback.endswith(line_end):
+                fallback = fallback + line_end
+            lines.append(fallback)
 
     return "\n".join(lines).strip()
-
 
 def _group_rows_by_table(
     rows: List[Dict[str, Any]],
@@ -390,38 +414,46 @@ def _group_rows_by_table(
     return groups
 
 
-def _chunk_sentence_to_candidate(chunk_item: Dict[str, Any]) -> Dict[str, Any]:
+def _chunk_sentence_to_block(chunk_item: Dict[str, Any], local_order: int) -> Dict[str, Any]:
     path = _ensure_path(chunk_item.get("path", []))
     title = _clean_text(chunk_item.get("title"))
+    text = _clean_text(chunk_item.get("faithful_text"))
+    token_estimate = int(chunk_item.get("token_estimate", 0) or 0)
+    if token_estimate <= 0:
+        token_estimate = estimate_tokens(text)
+    row_count = int(chunk_item.get("row_count", 0) or 0)
+    if row_count <= 0:
+        row_count = len(chunk_item.get("row_indices", []))
+
     return {
         "section_id": _clean_text(chunk_item.get("section_id")),
         "title": title,
         "path": path,
-        "content": _clean_text(chunk_item.get("faithful_text")),
-        "system_tag": _derive_system_tag(path=path, title=title),
-        "components": [],
-        "interfaces": [],
-        "functions": [],
-        "logic_rules": [],
+        "order": int(local_order),
+        "chunk_index": int(chunk_item.get("chunk_index", 0) or local_order),
+        "text": text,
+        "source": "table_pack",
+        "token_estimate": token_estimate,
+        "token_budget": int(chunk_item.get("token_budget", 0) or 0),
+        "part_count": row_count,
         "table_id": _clean_text(chunk_item.get("table_id")),
-        "chunk_index": int(chunk_item.get("chunk_index", 0) or 0),
         "row_start": int(chunk_item.get("row_start", 0) or 0),
         "row_end": int(chunk_item.get("row_end", 0) or 0),
-        "row_count": int(chunk_item.get("row_count", 0) or 0),
+        "row_count": row_count,
         "row_indices": chunk_item.get("row_indices", []),
+        "header": chunk_item.get("header", []),
         "row_maps": chunk_item.get("row_maps", []),
         "row_token_estimates": chunk_item.get("row_token_estimates", []),
         "row_token_sum": int(chunk_item.get("row_token_sum", 0) or 0),
-        "token_estimate": int(chunk_item.get("token_estimate", 0) or 0),
-        "token_budget": int(chunk_item.get("token_budget", 0) or 0),
         "has_oversize_row": bool(chunk_item.get("has_oversize_row", False)),
+        "system_tag": _derive_system_tag(path=path, title=title),
     }
 
 
 def run_table_pipeline(
     input_file: str = INPUT_TABLE_ROWS,
     sentences_output: str = OUTPUT_TABLE_SENTENCES,
-    candidates_output: str = OUTPUT_TABLE_CANDIDATES,
+    blocks_output: str = OUTPUT_TABLE_BLOCKS,
     base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
     api_key: Optional[str] = None,
@@ -449,22 +481,31 @@ def run_table_pipeline(
 
     _dump_jsonl(sentences_output, sentence_rows)
 
-    candidates = [_chunk_sentence_to_candidate(x) for x in sentence_rows if _clean_text(x.get("faithful_text"))]
-    _dump_json(candidates_output, candidates)
+    section_orders: Dict[str, int] = {}
+    blocks: List[Dict[str, Any]] = []
+    for item in sentence_rows:
+        section_id = _clean_text(item.get("section_id"))
+        order_key = section_id if section_id else "__NO_SECTION__"
+        section_orders[order_key] = int(section_orders.get(order_key, 0) or 0) + 1
+        block = _chunk_sentence_to_block(item, local_order=section_orders[order_key])
+        if _clean_text(block.get("text")):
+            blocks.append(block)
+
+    _dump_json(blocks_output, blocks)
 
     print("table groups: {0}".format(len(sentence_rows)))
-    print("table candidates: {0}".format(len(candidates)))
+    print("table blocks: {0}".format(len(blocks)))
     print("group mode: token_budget={0}".format(int(group_token_budget or 0)))
     print("[OUT] sentences : {0}".format(os.path.abspath(sentences_output)))
-    print("[OUT] candidates: {0}".format(os.path.abspath(candidates_output)))
-    return candidates
+    print("[OUT] blocks    : {0}".format(os.path.abspath(blocks_output)))
+    return blocks
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run row-wise table rewrite pipeline.")
     parser.add_argument("--input", default=INPUT_TABLE_ROWS, help="Input table_rows.jsonl")
     parser.add_argument("--sentences-output", default=OUTPUT_TABLE_SENTENCES, help="Output table_sentences.jsonl")
-    parser.add_argument("--candidates-output", default=OUTPUT_TABLE_CANDIDATES, help="Output table_candidates.json")
+    parser.add_argument("--blocks-output", default=OUTPUT_TABLE_BLOCKS, help="Output table_blocks.json")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="LLM base URL")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="LLM model")
     parser.add_argument("--api-key", default=None, help="API key")
@@ -476,7 +517,7 @@ def main() -> None:
     run_table_pipeline(
         input_file=args.input,
         sentences_output=args.sentences_output,
-        candidates_output=args.candidates_output,
+        blocks_output=args.blocks_output,
         base_url=args.base_url,
         model=args.model,
         api_key=args.api_key,
