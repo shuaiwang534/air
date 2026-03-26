@@ -125,7 +125,16 @@ def load_candidate_blocks(file_path: str) -> List[Dict[str, Any]]:
 
 
 def build_prompt(candidate: Dict[str, Any]) -> str:
-    candidate_json = json.dumps(candidate, ensure_ascii=False, indent=2)
+    prompt_payload = {
+        "section_id": candidate.get("section_id"),
+        "title": candidate.get("title"),
+        "path": candidate.get("path", []),
+        "order": candidate.get("order"),
+        "source": candidate.get("source"),
+        "text": candidate.get("text", ""),
+        "token_estimate": candidate.get("token_estimate"),
+    }
+    candidate_json = json.dumps(prompt_payload, ensure_ascii=False, indent=2)
     return "请对下面的CandidateBlock进行语义分析，并严格只输出JSON:\n\n{0}".format(candidate_json)
 
 

@@ -3,12 +3,13 @@
 
 """
 Run full MBSE pipeline in one command:
-1) paragraph_chunks.py
-2) step0.py
-3) step1.py
-4) step2.py
-5) pipeline_integration/section_build.py
-6) pipeline_integration/candidate_to_md.py
+1) text_flow/paragraph_chunks.py
+2) text_flow/step0.py
+3) text_flow/step1.py
+4) text_flow/step2.py
+5) table_flow/pipeline.py
+6) pipeline_integration/section_build.py
+7) pipeline_integration/candidate_to_md.py
 """
 
 import argparse
@@ -18,12 +19,31 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import step0
-import step1
-import step2
-import table_pipeline
+from text_flow import step0
+from text_flow import step1
+from text_flow import step2
+from table_flow import pipeline as table_pipeline
 from pipeline_integration import candidate_to_md
 from pipeline_integration import section_build
+
+
+# User-editable defaults (modify here for one-place configuration)
+RUN_DEFAULTS: Dict[str, Any] = {
+    "input_doc": "A320文字版.docx",  # e.g. "your_input.docx"; None -> paragraph_chunks.INPUT_DOCX
+    "section_jsonl": None,  # None -> paragraph_chunks.OUTPUT_JSONL
+    "output_dir": "output",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "Qwen/Qwen2.5-72B-Instruct",
+    "api_key": None,
+    "doc_id": None,
+    "skip_section_md": False,
+    "skip_candidate_md": False,
+    "section_md_dir": "ragflow_evidence",
+    "candidate_md_dir": "ragflow_evidence_candidates",
+    "text_token_budget": 240,
+    "table_token_budget": 220,
+    "table_group_size": 6,
+}
 
 
 def _run_module_main(module, argv):
@@ -39,6 +59,31 @@ def _derive_doc_id(input_doc: str, doc_id: Optional[str]) -> str:
     if doc_id:
         return doc_id
     return Path(input_doc).stem or "DOC"
+
+
+def _auto_pick_input_doc(preferred: str) -> str:
+    """
+    Pick a usable input doc path.
+    1) Use preferred path if exists.
+    2) Try same stem .docx/.doc in cwd.
+    3) Fallback to first .docx then first .doc in cwd.
+    """
+    p = Path(preferred)
+    if p.exists():
+        return str(p)
+
+    parent = p.parent if str(p.parent) else Path(".")
+    stem = p.stem
+    for c in (parent / "{0}.docx".format(stem), parent / "{0}.doc".format(stem)):
+        if c.exists():
+            return str(c)
+
+    for c in parent.glob("*.docx"):
+        return str(c)
+    for c in parent.glob("*.doc"):
+        return str(c)
+
+    return preferred
 
 
 def _load_json_array(path: str) -> List[Dict[str, Any]]:
@@ -61,18 +106,26 @@ def _dump_json(path: str, payload: Any) -> None:
 
 
 def run_pipeline(
-    input_doc: Optional[str] = None,
-    section_jsonl: Optional[str] = None,
-    output_dir: str = "output",
-    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: str = "Qwen/Qwen2.5-72B-Instruct",
-    api_key: Optional[str] = None,
-    doc_id: Optional[str] = None,
-    build_section_md: bool = True,
-    build_candidate_md: bool = True,
-    section_md_dir: str = "ragflow_evidence",
-    candidate_md_dir: str = "ragflow_evidence_candidates",
+    input_doc: Optional[str] = RUN_DEFAULTS["input_doc"],
+    section_jsonl: Optional[str] = RUN_DEFAULTS["section_jsonl"],
+    output_dir: str = RUN_DEFAULTS["output_dir"],
+    base_url: str = RUN_DEFAULTS["base_url"],
+    model: str = RUN_DEFAULTS["model"],
+    api_key: Optional[str] = RUN_DEFAULTS["api_key"],
+    doc_id: Optional[str] = RUN_DEFAULTS["doc_id"],
+    build_section_md: bool = not RUN_DEFAULTS["skip_section_md"],
+    build_candidate_md: bool = not RUN_DEFAULTS["skip_candidate_md"],
+    section_md_dir: str = RUN_DEFAULTS["section_md_dir"],
+    candidate_md_dir: str = RUN_DEFAULTS["candidate_md_dir"],
+    text_token_budget: int = RUN_DEFAULTS["text_token_budget"],
+    table_token_budget: int = RUN_DEFAULTS["table_token_budget"],
+    table_group_size: int = RUN_DEFAULTS["table_group_size"],
 ) -> str:
+    if table_group_size <= 0:
+        table_group_size = 6
+    if text_token_budget <= 0:
+        text_token_budget = int(RUN_DEFAULTS["text_token_budget"])
+
     if api_key:
         os.environ["DASHSCOPE_API_KEY"] = api_key
 
@@ -81,27 +134,32 @@ def run_pipeline(
     paragraph_file = os.path.join(output_dir, "paragraph_blocks.json")
     semantic_file = os.path.join(output_dir, "semantic_blocks.json")
     candidate_file = os.path.join(output_dir, "candidate_blocks.json")
-    tables_raw_file = os.path.join(output_dir, "tables_raw.jsonl")
-    table_summary_file = os.path.join(output_dir, "table_summary.json")
+    table_rows_file = os.path.join(output_dir, "table_rows.jsonl")
+    table_sentences_file = os.path.join(output_dir, "table_sentences.jsonl")
     table_candidates_file = os.path.join(output_dir, "table_candidates.json")
     merged_candidate_file = os.path.join(output_dir, "candidate_blocks_merged.json")
 
     print("\n========== PARAGRAPH_CHUNKS ==========")
-    import paragraph_chunks
+    from text_flow import paragraph_chunks
 
     if not input_doc:
-        input_doc = getattr(paragraph_chunks, "INPUT_DOCX", "校验部分.doc")
+        input_doc = getattr(paragraph_chunks, "INPUT_DOCX", "input.docx")
+    input_doc = _auto_pick_input_doc(input_doc)
     if not section_jsonl:
         section_jsonl = getattr(paragraph_chunks, "OUTPUT_JSONL", "section_chunks.jsonl")
 
     use_doc_id = _derive_doc_id(input_doc=input_doc, doc_id=doc_id)
     paragraph_chunks.INPUT_DOCX = input_doc
     paragraph_chunks.OUTPUT_JSONL = section_jsonl
-    paragraph_chunks.OUTPUT_TABLES_JSONL = tables_raw_file
+    paragraph_chunks.OUTPUT_TABLES_JSONL = table_rows_file
     paragraph_chunks.main()
 
     print("\n========== STEP 0 ==========")
-    step0.run_step0(input_jsonl=section_jsonl, output_file=paragraph_file)
+    step0.run_step0(
+        input_jsonl=section_jsonl,
+        output_file=paragraph_file,
+        token_budget=text_token_budget,
+    )
 
     print("\n========== STEP 1 ==========")
     step1.INPUT_FILE = paragraph_file
@@ -119,13 +177,15 @@ def run_pipeline(
 
     print("\n========== TABLE PIPELINE ==========")
     table_pipeline.run_table_pipeline(
-        input_file=tables_raw_file,
-        summary_output=table_summary_file,
+        input_file=table_rows_file,
+        sentences_output=table_sentences_file,
         candidates_output=table_candidates_file,
         base_url=base_url,
         model=model,
         api_key=api_key,
-        use_llm=True,
+        use_llm=False,
+        group_token_budget=table_token_budget,
+        group_size=table_group_size,
     )
 
     print("\n========== MERGE CANDIDATES ==========")
@@ -177,8 +237,8 @@ def run_pipeline(
     print("[OUT] paragraph     : {0}".format(Path(paragraph_file).resolve()))
     print("[OUT] semantic      : {0}".format(Path(semantic_file).resolve()))
     print("[OUT] candidate     : {0}".format(Path(candidate_file).resolve()))
-    print("[OUT] tables raw    : {0}".format(Path(tables_raw_file).resolve()))
-    print("[OUT] table summary : {0}".format(Path(table_summary_file).resolve()))
+    print("[OUT] table rows    : {0}".format(Path(table_rows_file).resolve()))
+    print("[OUT] table sent    : {0}".format(Path(table_sentences_file).resolve()))
     print("[OUT] table cand    : {0}".format(Path(table_candidates_file).resolve()))
     print("[OUT] merged cand   : {0}".format(Path(merged_candidate_file).resolve()))
     if build_section_md:
@@ -191,17 +251,25 @@ def run_pipeline(
 
 def main():
     parser = argparse.ArgumentParser(description="Run full MBSE pipeline in one command.")
-    parser.add_argument("--input-doc", default=None, help="Input .doc/.docx file path; default from paragraph_chunks.INPUT_DOCX")
-    parser.add_argument("--section-jsonl", default=None, help="Output JSONL path; default from paragraph_chunks.OUTPUT_JSONL")
-    parser.add_argument("--output-dir", default="output", help="Output directory for step0/1/2 JSONs")
-    parser.add_argument("--base-url", default="https://dashscope.aliyuncs.com/compatible-mode/v1", help="LLM base URL")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-72B-Instruct", help="LLM model")
-    parser.add_argument("--api-key", default=None, help="DashScope API key")
-    parser.add_argument("--doc-id", default=None, help="Doc ID for markdown chunk ids; default from input doc name")
-    parser.add_argument("--skip-section-md", action="store_true", help="Skip section JSONL -> markdown")
-    parser.add_argument("--skip-candidate-md", action="store_true", help="Skip candidate JSON -> markdown")
-    parser.add_argument("--section-md-dir", default="ragflow_evidence", help="Output dir for section markdown")
-    parser.add_argument("--candidate-md-dir", default="ragflow_evidence_candidates", help="Output dir for candidate markdown")
+    parser.add_argument(
+        "--input-doc",
+        "-i",
+        default=RUN_DEFAULTS["input_doc"],
+        help="Input .doc/.docx file path; default from RUN_DEFAULTS/paragraph_chunks.INPUT_DOCX",
+    )
+    parser.add_argument("--section-jsonl", default=RUN_DEFAULTS["section_jsonl"], help="Output JSONL path; default from RUN_DEFAULTS/paragraph_chunks.OUTPUT_JSONL")
+    parser.add_argument("--output-dir", default=RUN_DEFAULTS["output_dir"], help="Output directory for step0/1/2 JSONs")
+    parser.add_argument("--base-url", default=RUN_DEFAULTS["base_url"], help="LLM base URL")
+    parser.add_argument("--model", default=RUN_DEFAULTS["model"], help="LLM model")
+    parser.add_argument("--api-key", default=RUN_DEFAULTS["api_key"], help="DashScope API key")
+    parser.add_argument("--doc-id", default=RUN_DEFAULTS["doc_id"], help="Doc ID for markdown chunk ids; default from input doc name")
+    parser.add_argument("--skip-section-md", action="store_true", default=RUN_DEFAULTS["skip_section_md"], help="Skip section JSONL -> markdown")
+    parser.add_argument("--skip-candidate-md", action="store_true", default=RUN_DEFAULTS["skip_candidate_md"], help="Skip candidate JSON -> markdown")
+    parser.add_argument("--section-md-dir", default=RUN_DEFAULTS["section_md_dir"], help="Output dir for section markdown")
+    parser.add_argument("--candidate-md-dir", default=RUN_DEFAULTS["candidate_md_dir"], help="Output dir for candidate markdown")
+    parser.add_argument("--text-token-budget", type=int, default=RUN_DEFAULTS["text_token_budget"], help="Token budget per merged text chunk before Step1 LLM")
+    parser.add_argument("--table-token-budget", type=int, default=RUN_DEFAULTS["table_token_budget"], help="Token budget per merged table chunk")
+    parser.add_argument("--table-group-size", type=int, default=RUN_DEFAULTS["table_group_size"], help="Fallback rows per table group when table token budget <= 0")
     args = parser.parse_args()
 
     run_pipeline(
@@ -216,6 +284,9 @@ def main():
         build_candidate_md=not args.skip_candidate_md,
         section_md_dir=args.section_md_dir,
         candidate_md_dir=args.candidate_md_dir,
+        text_token_budget=args.text_token_budget,
+        table_token_budget=args.table_token_budget,
+        table_group_size=args.table_group_size,
     )
 
 
